@@ -91,7 +91,7 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({
     const chart = createChart(container, {
       width,
       height,
-      layout: { background: { color: '#09090b' }, textColor: '#71717a' },
+      layout: { background: { color: '#09090b' }, textColor: '#71717a', attributionLogo: false },
       grid: { vertLines: { color: '#18181b' }, horzLines: { color: '#18181b' } },
       crosshair: { mode: 0 },
       timeScale: { timeVisible: true, secondsVisible: false, borderColor: '#27272a' },
