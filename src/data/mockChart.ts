@@ -42,12 +42,12 @@ export interface Candle {
   }
   
   // Generates 250 base 1-minute candles
-  export function generateMockCandles(): Candle[] {
+  export function generateMockCandles(count = 2500): Candle[] {
     const candles: Candle[] = [];
     let currentPrice = 2035.50; // Gold (XAUUSD) style price
-    let startTime = Math.floor(Date.now() / 1000) - (250 * 60);
+    let startTime = Math.floor(Date.now() / 1000) - (count * 60);
   
-    for (let i = 0; i < 250; i++) {
+    for (let i = 0; i < count; i++) {
       const volatility = (Math.random() - 0.49) * 2.5;
       const open = currentPrice;
       const close = open + volatility;
