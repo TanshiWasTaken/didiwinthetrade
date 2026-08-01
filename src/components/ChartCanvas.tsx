@@ -19,11 +19,12 @@ interface ChartCanvasProps {
   onTimeframeChange: (tf: Timeframe) => void;
   tpPrice: number | null;
   slPrice: number | null;
+  entryPrice: number;
   onUpdateTpSl: (tp: number, sl: number) => void;
   isAnimating: boolean;
+  expirationIndex?: number;
 }
 
-// 1. Updated Interface: Uses Time instead of Logical index
 interface DrawnLine {
   id: string;
   startTime: Time;
@@ -32,15 +33,32 @@ interface DrawnLine {
   endPrice: number;
 }
 
+const getTimeframeMultiplier = (tf: Timeframe): number => {
+  switch (tf) {
+    case '5m': return 5;
+    case '15m': return 15;
+    case '1m':
+    default: return 1;
+  }
+};
+
+const bucketTime = (timeSec: number, tf: Timeframe): number => {
+  const bucketSec = getTimeframeMultiplier(tf) * 60;
+  return Math.floor(timeSec / bucketSec) * bucketSec;
+};
+
 export const ChartCanvas: React.FC<ChartCanvasProps> = ({
   baseCandles,
   visibleCount,
+  animatedCandle,
   timeframe,
   onTimeframeChange,
   tpPrice,
   slPrice,
+  entryPrice,
   onUpdateTpSl,
   isAnimating,
+  expirationIndex = 1820,
 }) => {
   const chartContainerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -48,14 +66,32 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({
 
   const tpLineRef = useRef<IPriceLine | null>(null);
   const slLineRef = useRef<IPriceLine | null>(null);
+  const entryLineRef = useRef<IPriceLine | null>(null);
 
   const tpPriceRef = useRef(tpPrice);
   const slPriceRef = useRef(slPrice);
+  const entryPriceRef = useRef(entryPrice);
+  const baseCandlesRef = useRef(baseCandles);
+  const visibleCountRef = useRef(visibleCount);
+  const expirationIndexRef = useRef(expirationIndex);
+  const timeframeRef = useRef(timeframe);
+  const prevTimeframeRef = useRef<Timeframe>(timeframe);
+
+  // Active forming candle reference to prevent sparse gaps
+  const currentAggregatedBarRef = useRef<CandlestickData | null>(null);
+
   tpPriceRef.current = tpPrice;
   slPriceRef.current = slPrice;
+  entryPriceRef.current = entryPrice;
+  baseCandlesRef.current = baseCandles;
+  visibleCountRef.current = visibleCount;
+  expirationIndexRef.current = expirationIndex;
+  timeframeRef.current = timeframe;
 
   const [tpY, setTpY] = useState<number | null>(null);
   const [slY, setSlY] = useState<number | null>(null);
+  const [entryY, setEntryY] = useState<number | null>(null);
+  const [expirationX, setExpirationX] = useState<number | null>(null);
   const isDraggingRef = useRef<'TP' | 'SL' | null>(null);
 
   const [, setTick] = useState(0);
@@ -63,20 +99,52 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({
   const [lines, setLines] = useState<DrawnLine[]>([]);
   const [currentLine, setCurrentLine] = useState<{ startX: number; startY: number; endX: number; endY: number } | null>(null);
 
-  // Store initial time anchor for active drawing line
   const drawStartRef = useRef<{ x: number; y: number; price: number; time: Time } | null>(null);
 
   const updateOverlayPositions = useCallback(() => {
-    if (!seriesRef.current || !chartContainerRef.current) return;
+    if (!seriesRef.current || !chartRef.current) return;
 
     if (tpPriceRef.current !== null) {
-      const y = seriesRef.current.priceToCoordinate(tpPriceRef.current);
-      setTpY(y);
+      setTpY(seriesRef.current.priceToCoordinate(tpPriceRef.current));
     }
     if (slPriceRef.current !== null) {
-      const y = seriesRef.current.priceToCoordinate(slPriceRef.current);
-      setSlY(y);
+      setSlY(seriesRef.current.priceToCoordinate(slPriceRef.current));
     }
+    setEntryY(seriesRef.current.priceToCoordinate(entryPriceRef.current));
+
+    const candles = baseCandlesRef.current;
+    const expIdx = expirationIndexRef.current;
+    const tf = timeframeRef.current;
+
+    if (candles && candles.length > 0) {
+      const expCandle = candles[expIdx] || candles[candles.length - 1];
+      if (expCandle) {
+        const timeScale = chartRef.current.timeScale();
+        const expTimeSec = typeof expCandle.time === 'number' 
+          ? expCandle.time 
+          : new Date(expCandle.time).getTime() / 1000;
+
+        const targetBucketSec = bucketTime(expTimeSec, tf) as Time;
+        const x = timeScale.timeToCoordinate(targetBucketSec);
+
+        if (x !== null) {
+          setExpirationX(x);
+        } else {
+          const mult = getTimeframeMultiplier(tf);
+          const targetLogicalIdx = Math.floor(expIdx / mult);
+          const currentLastLogicalIdx = Math.floor((visibleCountRef.current - 1) / mult);
+
+          const lastX = timeScale.logicalToCoordinate(currentLastLogicalIdx as any);
+          const prevX = timeScale.logicalToCoordinate((currentLastLogicalIdx - 1) as any);
+
+          if (lastX !== null && prevX !== null) {
+            const barWidth = lastX - prevX;
+            setExpirationX(lastX + (targetLogicalIdx - currentLastLogicalIdx) * barWidth);
+          }
+        }
+      }
+    }
+
     setTick((t) => t + 1);
   }, []);
 
@@ -94,7 +162,13 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({
       layout: { background: { color: '#09090b' }, textColor: '#71717a', attributionLogo: false },
       grid: { vertLines: { color: '#18181b' }, horzLines: { color: '#18181b' } },
       crosshair: { mode: 0 },
-      timeScale: { timeVisible: true, secondsVisible: false, borderColor: '#27272a' },
+      timeScale: { 
+        timeVisible: true, 
+        secondsVisible: false, 
+        borderColor: '#27272a',
+        rightOffset: 25,
+        shiftVisibleRangeOnNewBar: false,
+      },
       rightPriceScale: { borderColor: '#27272a' },
     });
 
@@ -145,27 +219,110 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({
       chartRef.current = null;
       seriesRef.current = null;
     };
-  }, [updateOverlayPositions]);
+  }, []);
 
-  // 2. Update Data
+  // 2. Base Dataset Loading & Timeframe Switching
   useEffect(() => {
-    if (!seriesRef.current) return;
+    if (!seriesRef.current || !chartRef.current) return;
+
+    const tfChanged = prevTimeframeRef.current !== timeframe;
+    if (isAnimating && !tfChanged) return;
 
     const safeCount = Math.max(1, visibleCount);
-    const currentBase = baseCandles.slice(0, safeCount);
-    if (currentBase.length === 0) return;
+    const sliceData = baseCandles.slice(0, safeCount);
+    if (sliceData.length === 0) return;
 
-    const aggregated = aggregateCandles(currentBase, timeframe) as CandlestickData[];
+    const timeScale = chartRef.current.timeScale();
+    const currentLogicalRange = timeScale.getVisibleLogicalRange();
+
+    const aggregated = aggregateCandles(sliceData, timeframe) as CandlestickData[];
     seriesRef.current.setData(aggregated);
+
+    // Track the last bar of the aggregated set as our active forming candle baseline
+    if (aggregated.length > 0) {
+      currentAggregatedBarRef.current = { ...aggregated[aggregated.length - 1] };
+    }
+
+    if (tfChanged && currentLogicalRange) {
+      const oldMult = getTimeframeMultiplier(prevTimeframeRef.current);
+      const newMult = getTimeframeMultiplier(timeframe);
+      const ratio = oldMult / newMult;
+
+      timeScale.setVisibleLogicalRange({
+        from: currentLogicalRange.from * ratio,
+        to: currentLogicalRange.to * ratio,
+      });
+
+      prevTimeframeRef.current = timeframe;
+    }
 
     requestAnimationFrame(() => {
       updateOverlayPositions();
     });
-  }, [baseCandles, visibleCount, timeframe, updateOverlayPositions]);
+  }, [baseCandles, timeframe, visibleCount, isAnimating, updateOverlayPositions]);
 
-  // 3. Render TP & SL Lines
+  // 3. Live Tick Aggregation (Fixes gaps and erratic rendering on 5m/15m)
+  useEffect(() => {
+    if (!seriesRef.current || !animatedCandle || !isAnimating || !chartRef.current) return;
+
+    const rawTimeSec = typeof animatedCandle.time === 'number'
+      ? animatedCandle.time
+      : new Date(animatedCandle.time).getTime() / 1000;
+
+    const bTime = bucketTime(rawTimeSec, timeframe) as Time;
+    const prevBar = currentAggregatedBarRef.current;
+
+    let updatedBar: CandlestickData;
+
+    // Check if tick belongs to the current open bucket or starts a brand new bucket
+    if (prevBar && prevBar.time === bTime) {
+      updatedBar = {
+        time: bTime,
+        open: prevBar.open,
+        high: Math.max(prevBar.high, animatedCandle.high),
+        low: Math.min(prevBar.low, animatedCandle.low),
+        close: animatedCandle.close,
+      };
+    } else {
+      // New timeframe bucket started
+      updatedBar = {
+        time: bTime,
+        open: animatedCandle.open,
+        high: animatedCandle.high,
+        low: animatedCandle.low,
+        close: animatedCandle.close,
+      };
+    }
+
+    currentAggregatedBarRef.current = updatedBar;
+
+    const timeScale = chartRef.current.timeScale();
+    const existingRange = timeScale.getVisibleLogicalRange();
+
+    seriesRef.current.update(updatedBar);
+
+    if (existingRange) {
+      timeScale.setVisibleLogicalRange(existingRange);
+    }
+
+    requestAnimationFrame(() => {
+      updateOverlayPositions();
+    });
+  }, [animatedCandle, timeframe, isAnimating, updateOverlayPositions]);
+
+  // 4. Update Price Lines
   useEffect(() => {
     if (!seriesRef.current) return;
+
+    if (entryLineRef.current) seriesRef.current.removePriceLine(entryLineRef.current);
+    entryLineRef.current = seriesRef.current.createPriceLine({
+      price: entryPrice,
+      color: '#3b82f6',
+      lineWidth: 2,
+      lineStyle: LineStyle.Solid,
+      axisLabelVisible: true,
+      title: 'ENTRY',
+    });
 
     if (tpPrice !== null) {
       if (tpLineRef.current) seriesRef.current.removePriceLine(tpLineRef.current);
@@ -194,7 +351,7 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({
     requestAnimationFrame(() => {
       updateOverlayPositions();
     });
-  }, [tpPrice, slPrice, updateOverlayPositions]);
+  }, [entryPrice, tpPrice, slPrice, updateOverlayPositions]);
 
   const handlePointerDown = (type: 'TP' | 'SL') => (e: React.PointerEvent) => {
     if (isAnimating) return;
@@ -221,55 +378,22 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({
 
   const handlePointerUp = (e: React.PointerEvent) => {
     if (isDraggingRef.current) {
-      (e.target as HTMLElement).releasePointerCapture(e.pointerId);
+      (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId);
       isDraggingRef.current = null;
     }
   };
 
-  // Convert stored timestamp & price anchors back to current canvas X/Y
-  // Helper to snap/find closest valid coordinate even if exact minute doesn't exist on current TF
-const getLineCoordinates = (line: DrawnLine) => {
+  const getLineCoordinates = (line: DrawnLine) => {
     if (!seriesRef.current || !chartRef.current) return null;
-  
+
     const y1 = seriesRef.current.priceToCoordinate(line.startPrice);
     const y2 = seriesRef.current.priceToCoordinate(line.endPrice);
-  
     const timeScale = chartRef.current.timeScale();
-    
-    // Try exact lookup first
+
     let x1 = timeScale.timeToCoordinate(line.startTime);
     let x2 = timeScale.timeToCoordinate(line.endTime);
-  
-    // Fallback: If timestamp doesn't exist on higher timeframe, fallback to logical index interpolation
-    if (x1 === null) {
-      const timeNum = typeof line.startTime === 'number' ? line.startTime : Number(line.startTime);
-      // Find closest candle time in current aggregated series data
-      const data = seriesRef.current.data();
-      if (data.length > 0) {
-        const closest = data.reduce((prev, curr) => {
-          const prevTime = typeof prev.time === 'number' ? prev.time : Number(prev.time);
-          const currTime = typeof curr.time === 'number' ? curr.time : Number(curr.time);
-          return Math.abs(currTime - timeNum) < Math.abs(prevTime - timeNum) ? curr : prev;
-        });
-        x1 = timeScale.timeToCoordinate(closest.time);
-      }
-    }
-  
-    if (x2 === null) {
-      const timeNum = typeof line.endTime === 'number' ? line.endTime : Number(line.endTime);
-      const data = seriesRef.current.data();
-      if (data.length > 0) {
-        const closest = data.reduce((prev, curr) => {
-          const prevTime = typeof prev.time === 'number' ? prev.time : Number(prev.time);
-          const currTime = typeof curr.time === 'number' ? curr.time : Number(curr.time);
-          return Math.abs(currTime - timeNum) < Math.abs(prevTime - timeNum) ? curr : prev;
-        });
-        x2 = timeScale.timeToCoordinate(closest.time);
-      }
-    }
-  
+
     if (x1 === null || y1 === null || x2 === null || y2 === null) return null;
-  
     return { x1, y1, x2, y2 };
   };
 
@@ -338,13 +462,12 @@ const getLineCoordinates = (line: DrawnLine) => {
   };
 
   return (
-    <div className="relative w-full h-[550px] bg-zinc-950 border border-zinc-800 rounded-xl overflow-hidden select-none">
+    <div className="relative w-full h-full bg-zinc-950 border border-zinc-800 rounded-xl overflow-hidden select-none">
       <div className="absolute top-4 left-4 z-30 flex items-center gap-2">
         <div className="flex space-x-1 bg-zinc-900/90 p-1 rounded-lg border border-zinc-800">
           {(['1m', '5m', '15m'] as Timeframe[]).map((tf) => (
             <button
               key={tf}
-              disabled={isAnimating}
               onClick={() => onTimeframeChange(tf)}
               className={`px-3 py-1 text-xs font-semibold rounded-md transition-colors ${
                 timeframe === tf
@@ -365,7 +488,7 @@ const getLineCoordinates = (line: DrawnLine) => {
               : 'bg-zinc-900/90 text-zinc-400 border-zinc-800 hover:text-zinc-200'
           }`}
         >
-          ✏️ {isDrawingMode ? 'Drawing On' : 'Draw Line'}
+          ✏️ {isDrawingMode ? 'Drawing On' : 'Drawing Off'}
         </button>
 
         {lines.length > 0 && (
@@ -417,9 +540,49 @@ const getLineCoordinates = (line: DrawnLine) => {
             strokeWidth="2"
           />
         )}
+
+        {/* Vertical Expiration Line */}
+        {expirationX !== null && expirationX > 0 && (
+          <g className="pointer-events-none">
+            <line
+              x1={expirationX}
+              y1={0}
+              x2={expirationX}
+              y2="100%"
+              stroke="#f59e0b"
+              strokeWidth="1.5"
+              strokeDasharray="5 5"
+              opacity="0.8"
+            />
+            <text
+              x={expirationX + 6}
+              y={24}
+              fill="#f59e0b"
+              fontSize="10"
+              fontWeight="bold"
+              fontFamily="monospace"
+              opacity="0.9"
+            >
+              EXPIRATION
+            </text>
+          </g>
+        )}
       </svg>
 
-      {!isAnimating && tpY !== null && tpY >= 0 && tpY <= 550 && (
+      {/* Entry Badge */}
+      {entryY !== null && entryY >= 0 && (
+        <div
+          style={{ top: `${entryY - 12}px` }}
+          className="absolute left-4 z-20 pointer-events-none select-none"
+        >
+          <div className="bg-blue-950/90 border border-blue-500/80 text-blue-400 text-[11px] font-mono font-medium px-2 py-0.5 rounded shadow-md flex items-center gap-1">
+            Entry: ${entryPrice.toFixed(2)}
+          </div>
+        </div>
+      )}
+
+      {/* TP Badge */}
+      {!isAnimating && tpY !== null && tpY >= 0 && (
         <div
           onPointerDown={handlePointerDown('TP')}
           onPointerMove={handlePointerMove}
@@ -433,7 +596,8 @@ const getLineCoordinates = (line: DrawnLine) => {
         </div>
       )}
 
-      {!isAnimating && slY !== null && slY >= 0 && slY <= 550 && (
+      {/* SL Badge */}
+      {!isAnimating && slY !== null && slY >= 0 && (
         <div
           onPointerDown={handlePointerDown('SL')}
           onPointerMove={handlePointerMove}
