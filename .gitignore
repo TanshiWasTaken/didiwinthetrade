@@ -22,3 +22,7 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Data
+public/data/*
+src/data/XAUUSD/*
