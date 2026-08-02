@@ -37,3 +37,10 @@ didiwinthetrade.com is a web-based trading sandbox designed to bridge the gap be
 * **Extended Technical Tooling:** Integration for horizontal support/resistance rays and custom Fibonacci retracement overlays.
 * **Performance Enhancements:** Vector rendering optimisations for high-density streaming candle environments.
 * **Fullscreen mode:** A chart-focused, distraction-free, fullscreen environment for deeper technical analysis.
+* **Themes:** A way for users to select pre-made themes or customise one themselves.
+
+---
+
+## Known bugs
+
+* **C_001:** The "EXPIRATION" vertical line is layered on top of the X and Y-axis scale. - *No plans to fix yet.*
