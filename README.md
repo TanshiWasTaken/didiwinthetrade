@@ -35,4 +35,5 @@ didiwinthetrade.com is a web-based trading sandbox designed to bridge the gap be
 
 * **Advanced Drawing Interactions:** Selection, editing, and deletion capabilities for individual trendlines, alongside endpoint adjustments.
 * **Extended Technical Tooling:** Integration for horizontal support/resistance rays and custom Fibonacci retracement overlays.
-* **Performance Enhancements:** Vector rendering optimizations for high-density streaming candle environments.
+* **Performance Enhancements:** Vector rendering optimisations for high-density streaming candle environments.
+* **Fullscreen mode:** A chart-focused, distraction-free, fullscreen environment for deeper technical analysis.
