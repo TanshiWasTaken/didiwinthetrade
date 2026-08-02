@@ -9,7 +9,7 @@ import {
   type CandlestickData,
   type Time
 } from 'lightweight-charts';
-import { aggregateCandles, type Candle, type Timeframe } from '../data/mockChart';
+import { aggregateCandles, type Candle, type Timeframe } from '../data/scenarioLoader';
 
 interface ChartCanvasProps {
   baseCandles: Candle[];
@@ -32,6 +32,15 @@ interface DrawnLine {
   endTime: Time;
   endPrice: number;
 }
+
+const parseTimeToSec = (t: Time): number => {
+  if (typeof t === 'number') return t;
+  if (typeof t === 'string') return new Date(t).getTime() / 1000;
+  if (typeof t === 'object' && t !== null && 'year' in t) {
+    return new Date(Date.UTC(t.year, t.month - 1, t.day)).getTime() / 1000;
+  }
+  return 0;
+};
 
 const getTimeframeMultiplier = (tf: Timeframe): number => {
   switch (tf) {
@@ -77,7 +86,6 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({
   const timeframeRef = useRef(timeframe);
   const prevTimeframeRef = useRef<Timeframe>(timeframe);
 
-  // Active forming candle reference to prevent sparse gaps
   const currentAggregatedBarRef = useRef<CandlestickData | null>(null);
 
   tpPriceRef.current = tpPrice;
@@ -120,15 +128,20 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({
       const expCandle = candles[expIdx] || candles[candles.length - 1];
       if (expCandle) {
         const timeScale = chartRef.current.timeScale();
-        const expTimeSec = typeof expCandle.time === 'number' 
-          ? expCandle.time 
+        const expTimeSec = typeof expCandle.time === 'number'
+          ? expCandle.time
           : new Date(expCandle.time).getTime() / 1000;
 
         const targetBucketSec = bucketTime(expTimeSec, tf) as Time;
         const x = timeScale.timeToCoordinate(targetBucketSec);
 
         if (x !== null) {
-          setExpirationX(x);
+          const timeScaleWidth = chartRef.current.timeScale().width();
+          if (x > 0 && x <= timeScaleWidth) {
+            setExpirationX(x);
+          } else {
+            setExpirationX(null);
+          }
         } else {
           const mult = getTimeframeMultiplier(tf);
           const targetLogicalIdx = Math.floor(expIdx / mult);
@@ -148,7 +161,6 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({
     setTick((t) => t + 1);
   }, []);
 
-  // 1. Initialize Chart
   useEffect(() => {
     if (!chartContainerRef.current) return;
 
@@ -162,9 +174,9 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({
       layout: { background: { color: '#09090b' }, textColor: '#71717a', attributionLogo: false },
       grid: { vertLines: { color: '#18181b' }, horzLines: { color: '#18181b' } },
       crosshair: { mode: 0 },
-      timeScale: { 
-        timeVisible: true, 
-        secondsVisible: false, 
+      timeScale: {
+        timeVisible: true,
+        secondsVisible: false,
         borderColor: '#27272a',
         rightOffset: 25,
         shiftVisibleRangeOnNewBar: false,
@@ -221,7 +233,6 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({
     };
   }, []);
 
-  // 2. Base Dataset Loading & Timeframe Switching
   useEffect(() => {
     if (!seriesRef.current || !chartRef.current) return;
 
@@ -236,32 +247,48 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({
     const currentLogicalRange = timeScale.getVisibleLogicalRange();
 
     const aggregated = aggregateCandles(sliceData, timeframe) as CandlestickData[];
+
+    let currentBarSpan = 80;
+    let offsetFromRight = 10;
+
+    if (currentLogicalRange) {
+      currentBarSpan = Math.max(10, currentLogicalRange.to - currentLogicalRange.from);
+      const oldTotalBars = seriesRef.current.data().length || aggregated.length;
+      offsetFromRight = oldTotalBars - currentLogicalRange.to;
+    }
+
     seriesRef.current.setData(aggregated);
 
-    // Track the last bar of the aggregated set as our active forming candle baseline
     if (aggregated.length > 0) {
       currentAggregatedBarRef.current = { ...aggregated[aggregated.length - 1] };
     }
 
-    if (tfChanged && currentLogicalRange) {
-      const oldMult = getTimeframeMultiplier(prevTimeframeRef.current);
-      const newMult = getTimeframeMultiplier(timeframe);
-      const ratio = oldMult / newMult;
-
-      timeScale.setVisibleLogicalRange({
-        from: currentLogicalRange.from * ratio,
-        to: currentLogicalRange.to * ratio,
-      });
-
-      prevTimeframeRef.current = timeframe;
-    }
-
     requestAnimationFrame(() => {
+      if (!chartRef.current) return;
+
+      if (tfChanged) {
+        const oldMult = getTimeframeMultiplier(prevTimeframeRef.current);
+        const newMult = getTimeframeMultiplier(timeframe);
+        const ratio = oldMult / newMult;
+
+        const scaledBarSpan = currentBarSpan * ratio;
+        const totalBars = aggregated.length;
+
+        const newTo = totalBars - (offsetFromRight * ratio);
+        const newFrom = newTo - scaledBarSpan;
+
+        chartRef.current.timeScale().setVisibleLogicalRange({
+          from: newFrom,
+          to: newTo,
+        });
+
+        prevTimeframeRef.current = timeframe;
+      }
+
       updateOverlayPositions();
     });
   }, [baseCandles, timeframe, visibleCount, isAnimating, updateOverlayPositions]);
 
-  // 3. Live Tick Aggregation (Fixes gaps and erratic rendering on 5m/15m)
   useEffect(() => {
     if (!seriesRef.current || !animatedCandle || !isAnimating || !chartRef.current) return;
 
@@ -274,7 +301,6 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({
 
     let updatedBar: CandlestickData;
 
-    // Check if tick belongs to the current open bucket or starts a brand new bucket
     if (prevBar && prevBar.time === bTime) {
       updatedBar = {
         time: bTime,
@@ -284,7 +310,6 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({
         close: animatedCandle.close,
       };
     } else {
-      // New timeframe bucket started
       updatedBar = {
         time: bTime,
         open: animatedCandle.open,
@@ -310,7 +335,6 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({
     });
   }, [animatedCandle, timeframe, isAnimating, updateOverlayPositions]);
 
-  // 4. Update Price Lines
   useEffect(() => {
     if (!seriesRef.current) return;
 
@@ -390,8 +414,42 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({
     const y2 = seriesRef.current.priceToCoordinate(line.endPrice);
     const timeScale = chartRef.current.timeScale();
 
-    let x1 = timeScale.timeToCoordinate(line.startTime);
-    let x2 = timeScale.timeToCoordinate(line.endTime);
+    const startSec = parseTimeToSec(line.startTime);
+    const endSec = parseTimeToSec(line.endTime);
+
+    let x1 = timeScale.timeToCoordinate(startSec as Time);
+    let x2 = timeScale.timeToCoordinate(endSec as Time);
+
+    if (x1 === null) {
+      const bucketedStart = bucketTime(startSec, timeframe) as Time;
+      x1 = timeScale.timeToCoordinate(bucketedStart);
+    }
+
+    if (x2 === null) {
+      const bucketedEnd = bucketTime(endSec, timeframe) as Time;
+      x2 = timeScale.timeToCoordinate(bucketedEnd);
+    }
+
+    if (x1 === null || x2 === null) {
+      const currentData = seriesRef.current.data();
+      if (currentData.length > 0) {
+        if (x1 === null) {
+          const closestStartIndex = currentData.findIndex(
+            (d) => parseTimeToSec(d.time as Time) >= startSec
+          );
+          const targetIdx = closestStartIndex !== -1 ? closestStartIndex : currentData.length - 1;
+          x1 = timeScale.logicalToCoordinate(targetIdx as any);
+        }
+
+        if (x2 === null) {
+          const closestEndIndex = currentData.findIndex(
+            (d) => parseTimeToSec(d.time as Time) >= endSec
+          );
+          const targetIdx = closestEndIndex !== -1 ? closestEndIndex : currentData.length - 1;
+          x2 = timeScale.logicalToCoordinate(targetIdx as any);
+        }
+      }
+    }
 
     if (x1 === null || y1 === null || x2 === null || y2 === null) return null;
     return { x1, y1, x2, y2 };
@@ -463,17 +521,16 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({
 
   return (
     <div className="relative w-full h-full bg-zinc-950 border border-zinc-800 rounded-xl overflow-hidden select-none">
-      <div className="absolute top-4 left-4 z-30 flex items-center gap-2">
-        <div className="flex space-x-1 bg-zinc-900/90 p-1 rounded-lg border border-zinc-800">
+      <div className="absolute top-3 left-3 right-16 z-30 flex flex-wrap items-center gap-1.5 pointer-events-auto">
+        <div className="flex space-x-1 bg-zinc-900/90 p-1 rounded-lg border border-zinc-800 shrink-0">
           {(['1m', '5m', '15m'] as Timeframe[]).map((tf) => (
             <button
               key={tf}
               onClick={() => onTimeframeChange(tf)}
-              className={`px-3 py-1 text-xs font-semibold rounded-md transition-colors ${
-                timeframe === tf
-                  ? 'bg-zinc-800 text-zinc-100 border border-zinc-700'
-                  : 'text-zinc-400 hover:text-zinc-200'
-              }`}
+              className={`px-2.5 py-1 text-xs font-semibold rounded-md transition-colors whitespace-nowrap ${timeframe === tf
+                ? 'bg-zinc-800 text-zinc-100 border border-zinc-700'
+                : 'text-zinc-400 hover:text-zinc-200'
+                }`}
             >
               {tf.toUpperCase()}
             </button>
@@ -482,21 +539,20 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({
 
         <button
           onClick={() => setIsDrawingMode(!isDrawingMode)}
-          className={`px-3 py-1 text-xs font-medium rounded-lg border flex items-center gap-1.5 transition-colors ${
-            isDrawingMode
-              ? 'bg-blue-600/20 text-blue-400 border-blue-500/50'
-              : 'bg-zinc-900/90 text-zinc-400 border-zinc-800 hover:text-zinc-200'
-          }`}
+          className={`px-2.5 py-1 text-xs font-medium rounded-lg border flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0 ${isDrawingMode
+            ? 'bg-blue-600/20 text-blue-400 border-blue-500/50'
+            : 'bg-zinc-900/90 text-zinc-400 border-zinc-800 hover:text-zinc-200'
+            }`}
         >
-          ✏️ {isDrawingMode ? 'Drawing On' : 'Drawing Off'}
+          ✏️ <span>{isDrawingMode ? 'Drawing On' : 'Drawing Off'}</span>
         </button>
 
         {lines.length > 0 && (
           <button
             onClick={() => setLines([])}
-            className="px-2 py-1 text-[11px] text-zinc-500 hover:text-rose-400 transition-colors"
+            className="px-2 py-1 text-xs font-medium bg-zinc-900/90 text-zinc-400 hover:text-rose-400 border border-zinc-800 rounded-lg transition-colors whitespace-nowrap shrink-0"
           >
-            Clear Lines
+            Clear ({lines.length})
           </button>
         )}
       </div>
@@ -508,9 +564,8 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({
         onPointerMove={handleSvgPointerMove}
         onPointerUp={handleSvgPointerUp}
         style={{ touchAction: 'none' }}
-        className={`absolute inset-0 w-full h-full z-10 touch-none ${
-          isDrawingMode ? 'pointer-events-auto cursor-crosshair' : 'pointer-events-none'
-        }`}
+        className={`absolute inset-0 w-full h-full z-10 touch-none ${isDrawingMode ? 'pointer-events-auto cursor-crosshair' : 'pointer-events-none'
+          }`}
       >
         {lines.map((line) => {
           const coords = getLineCoordinates(line);
@@ -541,7 +596,6 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({
           />
         )}
 
-        {/* Vertical Expiration Line */}
         {expirationX !== null && expirationX > 0 && (
           <g className="pointer-events-none">
             <line
@@ -556,7 +610,7 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({
             />
             <text
               x={expirationX + 6}
-              y={24}
+              y={65}
               fill="#f59e0b"
               fontSize="10"
               fontWeight="bold"
@@ -569,7 +623,6 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({
         )}
       </svg>
 
-      {/* Entry Badge */}
       {entryY !== null && entryY >= 0 && (
         <div
           style={{ top: `${entryY - 12}px` }}
@@ -581,7 +634,6 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({
         </div>
       )}
 
-      {/* TP Badge */}
       {!isAnimating && tpY !== null && tpY >= 0 && (
         <div
           onPointerDown={handlePointerDown('TP')}
@@ -596,7 +648,6 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({
         </div>
       )}
 
-      {/* SL Badge */}
       {!isAnimating && slY !== null && slY >= 0 && (
         <div
           onPointerDown={handlePointerDown('SL')}

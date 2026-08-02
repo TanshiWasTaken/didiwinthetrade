@@ -11,15 +11,23 @@ import {
   Check,
 } from 'lucide-react';
 import { ChartCanvas } from './components/ChartCanvas';
-import { generateMockCandles, type Candle, type Timeframe } from './data/mockChart';
+import {
+  fetchScenarios,
+  type Candle,
+  type Timeframe,
+  type Scenario,
+} from './data/scenarioLoader';
 
 const MIN_RR = 1.5;
-const FUTURE_HORIZON_CANDLES = 80;
+const LOOKBACK_CANDLES = 200; // Historical context candles before entry
 const ANIMATION_DURATION_MS = 5000;
 
 export default function App() {
-  const [baseCandles, setBaseCandles] = useState<Candle[]>(() => generateMockCandles(2500));
-  const [visibleCount, setVisibleCount] = useState<number>(1800);
+  const [allCandles] = useState<Candle[]>([]);
+  const [scenarios, setScenarios] = useState<Scenario[]>([]);
+  const [currentScenario, setCurrentScenario] = useState<Scenario | null>(null);
+  const [baseCandles, setBaseCandles] = useState<Candle[]>([]);
+  const [visibleCount, setVisibleCount] = useState<number>(LOOKBACK_CANDLES);
   const [animatedCandle, setAnimatedCandle] = useState<Candle | null>(null);
   const [timeframe, setTimeframe] = useState<Timeframe>('5m');
 
@@ -32,18 +40,54 @@ export default function App() {
   const [gamesPlayed, setGamesPlayed] = useState(0);
   const [roundId, setRoundId] = useState<number>(1);
   const [copied, setCopied] = useState(false);
+  const [loading, setLoading] = useState(true);
 
-  const entryPrice = baseCandles[1799]?.close || 2000;
+  //const entryIndex = currentScenario ? currentScenario.entryIndex : LOOKBACK_CANDLES; - old engine
+  const entryPrice = baseCandles[LOOKBACK_CANDLES - 1]?.close || 2000;
   const [tpPrice, setTpPrice] = useState<number>(() => Number((entryPrice + 12.0).toFixed(2)));
   const [slPrice, setSlPrice] = useState<number>(() => Number((entryPrice - 6.0).toFixed(2)));
 
   const animationTimerRef = useRef<number | null>(null);
 
+  // App.tsx
   useEffect(() => {
-    const currentEntry = baseCandles[1799]?.close || 2000;
-    setTpPrice(Number((currentEntry + 12.0).toFixed(2)));
-    setSlPrice(Number((currentEntry - 6.0).toFixed(2)));
-  }, [baseCandles]);
+    async function loadInitialData() {
+      try {
+        setLoading(true);
+        // Fetches pre-parsed scenario JSON only — no huge raw file!
+        const loadedScenarios = await fetchScenarios('fvg');
+        setScenarios(loadedScenarios);
+
+        if (loadedScenarios.length > 0) {
+          setCurrentScenario(loadedScenarios[0]);
+        }
+      } catch (err) {
+        console.error('Error loading scenario data:', err);
+      } finally {
+        setLoading(false);
+      }
+    }
+
+    loadInitialData();
+  }, []);
+
+  const loadScenario = (scenario: Scenario, dataset: Candle[] = allCandles) => {
+    if (!dataset.length) return;
+
+    setCurrentScenario(scenario);
+    setTimeframe(scenario.defaultTimeframe || '5m');
+
+    const startIdx = Math.max(0, scenario.entryIndex - LOOKBACK_CANDLES);
+    const endIdx = Math.min(dataset.length, scenario.entryIndex + scenario.expirationOffset + 10);
+    const slice = dataset.slice(startIdx, endIdx);
+
+    setBaseCandles(slice);
+    setVisibleCount(LOOKBACK_CANDLES);
+
+    const entryCandleClose = slice[LOOKBACK_CANDLES - 1]?.close || 2000;
+    setTpPrice(Number((entryCandleClose + 12.0).toFixed(2)));
+    setSlPrice(Number((entryCandleClose - 6.0).toFixed(2)));
+  };
 
   const calculateRR = (choice: 'BUY' | 'SELL') => {
     if (choice === 'BUY') {
@@ -64,23 +108,24 @@ export default function App() {
 
   const handleTrade = (choice: 'BUY' | 'SELL') => {
     const activeRR = calculateRR(choice);
-    if (activeRR < MIN_RR) return;
+    if (activeRR < MIN_RR || !currentScenario) return;
 
     setPosition(choice);
     setIsAnimating(true);
 
-    const startIndex = 1800;
-    const endIndex = Math.min(baseCandles.length, startIndex + FUTURE_HORIZON_CANDLES);
+    const startIndex = LOOKBACK_CANDLES;
+    const expirationOffset = currentScenario.expirationOffset || 15;
+    const endIndex = Math.min(baseCandles.length, startIndex + expirationOffset);
     const totalSteps = endIndex - startIndex;
 
-    const tickInterval = Math.max(20, Math.floor(ANIMATION_DURATION_MS / totalSteps));
+    const tickInterval = Math.max(20, Math.floor(ANIMATION_DURATION_MS / Math.max(1, totalSteps)));
     let currentIndex = startIndex;
 
     animationTimerRef.current = window.setInterval(() => {
       if (currentIndex < endIndex) {
         const nextCandle = baseCandles[currentIndex];
         setAnimatedCandle(nextCandle);
-        setVisibleCount(currentIndex);
+        setVisibleCount(currentIndex + 1);
 
         let hitResult: { win: boolean; reason: string } | null = null;
 
@@ -149,10 +194,13 @@ export default function App() {
     setPosition(null);
     setGameResult(null);
     setAnimatedCandle(null);
-    setBaseCandles(generateMockCandles(2500));
-    setVisibleCount(1800);
     setRoundId((prev) => prev + 1);
     setCopied(false);
+
+    if (scenarios.length > 0) {
+      const nextScenario = scenarios[Math.floor(Math.random() * scenarios.length)];
+      loadScenario(nextScenario);
+    }
   };
 
   const updateTpSl = (newTp: number, newSl: number) => {
@@ -191,21 +239,18 @@ export default function App() {
     const isValid = rr >= MIN_RR;
     return (
       <div
-        className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-sm border ${
-          isValid ? 'bg-[#17171a] border-emerald-700' : 'bg-[#17171a] border-zinc-800'
-        }`}
+        className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-sm border ${isValid ? 'bg-[#17171a] border-emerald-700' : 'bg-[#17171a] border-zinc-800'
+          }`}
       >
         <span
-          className={`text-[10px] font-bold tracking-wider uppercase ${
-            side === 'BUY' ? 'text-emerald-500' : 'text-rose-500'
-          }`}
+          className={`text-[10px] font-bold tracking-wider uppercase ${side === 'BUY' ? 'text-emerald-500' : 'text-rose-500'
+            }`}
         >
           {side}
         </span>
         <span
-          className={`font-mono font-bold tabular-nums tracking-tight text-sm ${
-            isValid ? 'text-zinc-100' : 'text-zinc-500'
-          }`}
+          className={`font-mono font-bold tabular-nums tracking-tight text-sm ${isValid ? 'text-zinc-100' : 'text-zinc-500'
+            }`}
         >
           {rr.toFixed(2)}
         </span>
@@ -224,30 +269,44 @@ export default function App() {
     </div>
   );
 
+  if (loading) {
+    return (
+      <div className="w-full h-[100dvh] bg-[#0b0b0c] text-zinc-100 flex items-center justify-center">
+        <div className="flex items-center gap-3">
+          <RefreshCw className="w-5 h-5 animate-spin text-emerald-500" />
+          <span className="font-mono text-sm tracking-wider uppercase">Loading Real Chart Scenarios...</span>
+        </div>
+      </div>
+    );
+  }
+
   return (
-    <div className="w-full h-screen bg-[#0b0b0c] text-zinc-100 flex flex-col items-center justify-center overflow-hidden">
-      <div className="w-full max-w-2xl px-4 py-4 sm:px-6 flex flex-col items-center justify-between h-full max-h-screen">
-        <header className="w-full mb-3 shrink-0">
-          <div className="flex items-center gap-2 mb-1">
-            <span className="w-1.5 h-6 bg-emerald-500 rounded-sm shrink-0" />
-            <h1 className="text-2xl sm:text-[28px] font-black tracking-tight uppercase text-zinc-100 leading-none">
+    <div className="w-full h-[100dvh] bg-[#0b0b0c] text-zinc-100 flex flex-col items-center justify-center overflow-hidden touch-none">
+      <div className="w-full max-w-2xl px-3 py-2 sm:px-6 flex flex-col items-center justify-between h-full overflow-hidden">
+        {/* Header */}
+        <header className="w-full mb-2 shrink-0">
+          <div className="flex items-center gap-2 mb-0.5">
+            <span className="w-1.5 h-5 bg-emerald-500 rounded-sm shrink-0" />
+            <h1 className="text-xl sm:text-[28px] font-black tracking-tight uppercase text-zinc-100 leading-none">
               Did I Win The Trade?
             </h1>
           </div>
-          <div className="flex flex-wrap items-center gap-x-2 pl-3.5 text-[11px] text-zinc-500">
+          <div className="flex flex-wrap items-center gap-x-2 pl-3.5 text-[10px] sm:text-[11px] text-zinc-500">
             <span className="font-mono uppercase tracking-wider">Round #{roundId}</span>
             <span className="text-zinc-700">·</span>
-            <span>Drag TP/SL on the chart edge</span>
+            <span>{currentScenario?.title || 'Real Scenario'}</span>
           </div>
         </header>
 
-        <div className="w-full grid grid-cols-3 gap-2 mb-3 shrink-0">
+        {/* Top Stats */}
+        <div className="w-full grid grid-cols-3 gap-2 mb-2 shrink-0">
           <StatTile label="Streak" value={streak} flame />
           <StatTile label="Best" value={bestStreak} />
           <StatTile label="Played" value={gamesPlayed} />
         </div>
 
-        <main className="w-full flex-1 flex flex-col gap-3 min-h-0">
+        {/* Main Container */}
+        <main className="w-full flex-1 flex flex-col gap-2 min-h-0 overflow-hidden">
           <div className="rounded-sm border-2 border-zinc-800 bg-[#17171a] overflow-hidden flex-1 min-h-0">
             <ChartCanvas
               key={roundId}
@@ -261,57 +320,59 @@ export default function App() {
               slPrice={slPrice}
               onUpdateTpSl={updateTpSl}
               isAnimating={isAnimating}
-              expirationIndex={1800 + FUTURE_HORIZON_CANDLES}
+              expirationIndex={LOOKBACK_CANDLES + (currentScenario?.expirationOffset || 15)}
             />
           </div>
 
-          <div className="rounded-sm border-2 border-zinc-800 bg-[#17171a] p-4 shrink-0">
-            <div className="flex items-center justify-between mb-3 pb-2 border-b border-zinc-800">
-              <div className="flex items-center gap-2">
+          <div className="rounded-sm border-2 border-zinc-800 bg-[#17171a] p-2.5 sm:p-4 shrink-0">
+            <div className="flex items-center justify-between mb-2 pb-1.5 border-b border-zinc-800">
+              <div className="flex items-center gap-1.5">
                 <Target className="w-3.5 h-3.5 text-zinc-500" />
                 <span className="text-[10px] font-bold tracking-wider text-zinc-500 uppercase">Entry</span>
               </div>
-              <span className="font-mono text-base font-bold text-zinc-100 tabular-nums tracking-tight">
+              <span className="font-mono text-sm sm:text-base font-bold text-zinc-100 tabular-nums tracking-tight">
                 ${entryPrice.toFixed(2)}
               </span>
             </div>
 
-            <div className="grid grid-cols-2 gap-3 sm:gap-4">
-              <div className="space-y-2">
+            <div className="grid grid-cols-2 gap-2 sm:gap-4">
+              <div className="space-y-1.5">
                 <button
                   disabled={isAnimating || position !== null || buyRR < MIN_RR}
                   onClick={() => handleTrade('BUY')}
-                  className="w-full py-3 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-30 disabled:cursor-not-allowed text-white font-bold text-sm uppercase tracking-wider rounded-sm border-2 border-emerald-700 flex items-center justify-center gap-2 transition-transform active:translate-y-0.5"
+                  className="w-full py-2.5 sm:py-3 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-30 disabled:cursor-not-allowed text-white font-bold text-xs sm:text-sm uppercase tracking-wider rounded-sm border-2 border-emerald-700 flex items-center justify-center gap-1 sm:gap-2 transition-transform active:translate-y-0.5 whitespace-nowrap"
                 >
-                  <TrendingUp className="w-4 h-4" />
-                  <span>Buy / Long</span>
-                  <kbd className="px-1.5 py-0.5 text-[10px] font-mono font-bold bg-black/25 text-white/80 rounded-sm border border-white/20">
+                  <TrendingUp className="w-3.5 h-3.5 shrink-0" />
+                  <span className="truncate">Buy / Long</span>
+                  <kbd className="hidden sm:inline-block px-1.5 py-0.5 text-[10px] font-mono font-bold bg-black/25 text-white/80 rounded-sm border border-white/20">
                     B
                   </kbd>
                 </button>
-                <div className="flex items-center justify-between px-0.5">
+
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-1 px-0.5">
                   <RrBadge rr={buyRR} side="BUY" />
-                  <span className="text-[11px] text-zinc-500 font-mono font-bold tabular-nums">
+                  <span className="text-[10px] sm:text-[11px] text-zinc-400 font-mono font-bold tabular-nums">
                     TP ${tpPrice.toFixed(2)}
                   </span>
                 </div>
               </div>
 
-              <div className="space-y-2">
+              <div className="space-y-1.5">
                 <button
                   disabled={isAnimating || position !== null || sellRR < MIN_RR}
                   onClick={() => handleTrade('SELL')}
-                  className="w-full py-3 bg-rose-600 hover:bg-rose-500 disabled:opacity-30 disabled:cursor-not-allowed text-white font-bold text-sm uppercase tracking-wider rounded-sm border-2 border-rose-700 flex items-center justify-center gap-2 transition-transform active:translate-y-0.5"
+                  className="w-full py-2.5 sm:py-3 bg-rose-600 hover:bg-rose-500 disabled:opacity-30 disabled:cursor-not-allowed text-white font-bold text-xs sm:text-sm uppercase tracking-wider rounded-sm border-2 border-rose-700 flex items-center justify-center gap-1 sm:gap-2 transition-transform active:translate-y-0.5 whitespace-nowrap"
                 >
-                  <TrendingDown className="w-4 h-4" />
-                  <span>Sell / Short</span>
-                  <kbd className="px-1.5 py-0.5 text-[10px] font-mono font-bold bg-black/25 text-white/80 rounded-sm border border-white/20">
+                  <TrendingDown className="w-3.5 h-3.5 shrink-0" />
+                  <span className="truncate">Sell / Short</span>
+                  <kbd className="hidden sm:inline-block px-1.5 py-0.5 text-[10px] font-mono font-bold bg-black/25 text-white/80 rounded-sm border border-white/20">
                     S
                   </kbd>
                 </button>
-                <div className="flex items-center justify-between px-0.5">
+
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-1 px-0.5">
                   <RrBadge rr={sellRR} side="SELL" />
-                  <span className="text-[11px] text-zinc-500 font-mono font-bold tabular-nums">
+                  <span className="text-[10px] sm:text-[11px] text-zinc-400 font-mono font-bold tabular-nums">
                     SL ${slPrice.toFixed(2)}
                   </span>
                 </div>
@@ -323,7 +384,7 @@ export default function App() {
         {showModal &&
           gameResult &&
           (() => {
-            const finalPrice = baseCandles[visibleCount]?.close || entryPrice;
+            const finalPrice = baseCandles[visibleCount - 1]?.close || entryPrice;
             const initialRisk = Math.abs(entryPrice - slPrice);
             const plannedTargetRR = position ? calculateRR(position) : 1;
 
@@ -357,17 +418,43 @@ export default function App() {
 
             const formattedR = realizedRR >= 0 ? `+${realizedRR.toFixed(2)}R` : `${realizedRR.toFixed(2)}R`;
 
-            const shareText = `Did I Win The Trade? #${roundId}\n${emojiRow} ${
-              gameResult.win ? 'WON' : 'LOST'
-            } · ${position}\n${formattedR} · 🔥 Streak: ${streak}\ndidiwinthetrade.com`;
+            const shareText = `Did I Win The Trade? #${roundId}\n${emojiRow} ${gameResult.win ? 'WON' : 'LOST'
+              } · ${position}\n${formattedR} · 🔥 Streak: ${streak}\ndidiwinthetrade.com`;
 
             const handleCopyResult = async () => {
-              try {
-                await navigator.clipboard.writeText(shareText);
+              let success = false;
+
+              if (navigator.clipboard && window.isSecureContext) {
+                try {
+                  await navigator.clipboard.writeText(shareText);
+                  success = true;
+                } catch {
+                  // Fallback below
+                }
+              }
+
+              if (!success) {
+                try {
+                  const textArea = document.createElement('textarea');
+                  textArea.value = shareText;
+                  textArea.style.position = 'fixed';
+                  textArea.style.top = '0';
+                  textArea.style.left = '0';
+                  textArea.style.opacity = '0';
+                  document.body.appendChild(textArea);
+                  textArea.focus();
+                  textArea.select();
+
+                  success = document.execCommand('copy');
+                  document.body.removeChild(textArea);
+                } catch {
+                  success = false;
+                }
+              }
+
+              if (success) {
                 setCopied(true);
                 window.setTimeout(() => setCopied(false), 1800);
-              } catch {
-                // fallback
               }
             };
 
@@ -378,11 +465,10 @@ export default function App() {
                 <div className="relative z-10 w-full max-w-sm rounded-sm border-2 border-zinc-700 bg-[#17171a] p-6 text-center space-y-5">
                   <div className="flex justify-center">
                     <div
-                      className={`w-14 h-14 rounded-sm border-2 flex items-center justify-center text-2xl font-bold text-white ${
-                        gameResult.win
-                          ? 'bg-emerald-600 border-emerald-700'
-                          : 'bg-rose-600 border-rose-700'
-                      }`}
+                      className={`w-14 h-14 rounded-sm border-2 flex items-center justify-center text-2xl font-bold text-white ${gameResult.win
+                        ? 'bg-emerald-600 border-emerald-700'
+                        : 'bg-rose-600 border-rose-700'
+                        }`}
                     >
                       {gameResult.win ? '✓' : '✕'}
                     </div>
@@ -390,9 +476,8 @@ export default function App() {
 
                   <div className="space-y-1">
                     <h2
-                      className={`text-xl font-extrabold tracking-wider uppercase ${
-                        gameResult.win ? 'text-emerald-500' : 'text-rose-500'
-                      }`}
+                      className={`text-xl font-extrabold tracking-wider uppercase ${gameResult.win ? 'text-emerald-500' : 'text-rose-500'
+                        }`}
                     >
                       {gameResult.win ? 'Trade Won' : 'Trade Lost'}
                     </h2>
@@ -404,13 +489,12 @@ export default function App() {
                       {tiles.map((t, i) => (
                         <div
                           key={i}
-                          className={`w-9 h-9 rounded-sm ${
-                            t === 'win'
-                              ? 'bg-emerald-600'
-                              : t === 'loss'
+                          className={`w-9 h-9 rounded-sm ${t === 'win'
+                            ? 'bg-emerald-600'
+                            : t === 'loss'
                               ? 'bg-rose-600'
                               : 'bg-[#0b0b0c] border border-zinc-800'
-                          }`}
+                            }`}
                         />
                       ))}
                     </div>
